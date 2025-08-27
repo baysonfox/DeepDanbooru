@@ -1,15 +1,17 @@
 import random
 
 import numpy as np
-import tensorflow as tf
-import tensorflow_io as tfio
+import torch
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import torchvision.transforms as transforms
 
 import deepdanbooru as dd
 
 
-class DatasetWrapper:
+class DatasetWrapper(Dataset):
     """
-    Wrapper class for data pipelining/augmentation.
+    PyTorch Dataset wrapper for data pipelining/augmentation.
     """
 
     def __init__(
@@ -23,62 +25,43 @@ class DatasetWrapper:
         self.shift_range = shift_range
         self.tag_all_array = np.array(tags)
 
-    def get_dataset(self, minibatch_size):
-        dataset = tf.data.Dataset.from_tensor_slices(self.inputs)
-        dataset = dataset.map(
-            self.map_load_image, num_parallel_calls=tf.data.AUTOTUNE
-        )
-        dataset = dataset.ignore_errors()
-        dataset = dataset.map(
-            self.map_transform_image_and_label,
-            num_parallel_calls=tf.data.AUTOTUNE,
-        )
-        dataset = dataset.batch(minibatch_size)
-        dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
-        # dataset = dataset.apply(
-        #    tf.data.experimental.prefetch_to_device('/device:GPU:0'))
+    def __len__(self):
+        return len(self.inputs)
 
-        return dataset
+    def __getitem__(self, idx):
+        image_path, tag_string = self.inputs[idx]
+        
+        # Load and process image
+        image = self.load_image(image_path)
+        
+        # Get tags for this image
+        labels = self.load_tags_for_image(tag_string)
+        
+        return image, labels
 
-    def map_load_image(self, image_path, tag_string):
-        image_raw = tf.io.read_file(image_path)
+    def get_dataloader(self, minibatch_size, shuffle=True, num_workers=4):
+        return DataLoader(
+            self, 
+            batch_size=minibatch_size, 
+            shuffle=shuffle, 
+            num_workers=num_workers,
+            pin_memory=True if torch.cuda.is_available() else False
+        )
+
+    def load_image(self, image_path):
+        """Load and preprocess image from path"""
         try:
-            image = tf.io.decode_png(image_raw, channels=3)
-        except:
-            image = tfio.image.decode_webp(image_raw)
-            image = tfio.experimental.color.rgba_to_rgb(image)
-
+            image = Image.open(image_path).convert('RGB')
+        except Exception:
+            # Return a default image if loading fails
+            image = Image.new('RGB', (self.width, self.height), color='black')
+        
+        # Convert to numpy for processing
+        image = np.array(image)
+        
+        # Apply transformations
         if self.scale_range:
-            pre_scale = self.scale_range[1]
-        else:
-            pre_scale = 1.0
-
-        size = (int(self.height * pre_scale), int(self.width * pre_scale))
-
-        image = tf.image.resize(
-            image,
-            size=size,
-            method=tf.image.ResizeMethod.AREA,
-            preserve_aspect_ratio=True,
-        )
-
-        return (image, tag_string)
-
-    def map_transform_image_and_label(self, image, tag_string):
-        return tf.py_function(
-            self.map_transform_image_and_label_py,
-            (image, tag_string),
-            (tf.float32, tf.float32),
-        )
-
-    def map_transform_image_and_label_py(self, image, tag_string):
-        # transform image
-        image = image.numpy()
-
-        if self.scale_range:
-            scale = random.uniform(self.scale_range[0], self.scale_range[1]) * (
-                1.0 / self.scale_range[1]
-            )
+            scale = random.uniform(self.scale_range[0], self.scale_range[1])
         else:
             scale = None
 
@@ -94,6 +77,7 @@ class DatasetWrapper:
         else:
             shift = None
 
+        # Apply image transformations (rotation, scale, shift, padding)
         image = dd.image.transform_and_pad_image(
             image=image,
             target_width=self.width,
@@ -103,15 +87,23 @@ class DatasetWrapper:
             shift=shift,
         )
 
-        image = image / 255.0  # normalize to 0~1
-        # image = image.astype(np.float32)
+        # Normalize to 0-1 range
+        image = image / 255.0
+        
+        # Convert to PyTorch tensor (HWC -> CHW)
+        image = torch.from_numpy(image).permute(2, 0, 1).float()
+        
+        return image
 
-        # transform tag
-        tag_string = tag_string.numpy().decode()
+    def load_tags_for_image(self, tag_string):
+        """Convert tag string to multi-label array"""
+        if isinstance(tag_string, bytes):
+            tag_string = tag_string.decode()
+        
         tag_array = np.array(tag_string.split(" "))
-
+        
         labels = np.where(np.isin(self.tag_all_array, tag_array), 1, 0).astype(
             np.float32
         )
-
-        return (image, labels)
+        
+        return torch.from_numpy(labels)

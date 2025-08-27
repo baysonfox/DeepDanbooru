@@ -1,6 +1,6 @@
 import os
 import deepdanbooru as dd
-import tensorflow as tf
+import torch
 
 DEFAULT_PROJECT_CONTEXT = {
     "image_width": 299,
@@ -44,13 +44,45 @@ def load_model_from_project(project_path, compile_model=True):
     project_context = dd.io.deserialize_from_json(project_context_path)
 
     model_type = project_context["model"]
-    model_path = os.path.join(project_path, f"model-{model_type}.keras")
+    model_path = os.path.join(project_path, f"model-{model_type}.pth")
 
     if not os.path.isfile(model_path):
-        model_path = os.path.join(project_path, f"model-{model_type}.h5")
+        # Try legacy formats
+        legacy_paths = [
+            os.path.join(project_path, f"model-{model_type}.keras"),
+            os.path.join(project_path, f"model-{model_type}.h5")
+        ]
+        for legacy_path in legacy_paths:
+            if os.path.isfile(legacy_path):
+                raise ValueError(f"Found TensorFlow model at {legacy_path}. Please convert to PyTorch format.")
+        
+        raise FileNotFoundError(f"No PyTorch model found at {model_path}")
 
-    model = tf.keras.models.load_model(model_path, compile=compile_model)
-
+    # Load tags to get output dimension
+    tags = load_tags_from_project(project_path)
+    output_dim = len(tags)
+    
+    # Get model architecture parameters
+    image_width = project_context.get("image_width", 299)
+    image_height = project_context.get("image_height", 299)
+    
+    # Create model instance
+    if model_type == "resnet_152":
+        model = dd.model.resnet.create_resnet_152((image_height, image_width, 3), output_dim)
+    elif model_type == "resnet_custom_v1":
+        model = dd.model.resnet.create_resnet_custom_v1((image_height, image_width, 3), output_dim)
+    elif model_type == "resnet_custom_v2":
+        model = dd.model.resnet.create_resnet_custom_v2((image_height, image_width, 3), output_dim)
+    elif model_type == "resnet_custom_v3":
+        model = dd.model.resnet.create_resnet_custom_v3((image_height, image_width, 3), output_dim)
+    elif model_type == "resnet_custom_v4":
+        model = dd.model.resnet.create_resnet_custom_v4((image_height, image_width, 3), output_dim)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
+    # Load state dict
+    model.load_state_dict(torch.load(model_path, map_location='cpu'))
+    
     return model
 
 

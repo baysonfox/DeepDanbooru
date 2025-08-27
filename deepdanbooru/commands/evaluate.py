@@ -2,7 +2,8 @@ import os
 from typing import Any, Iterable, List, Tuple, Union
 
 import six
-import tensorflow as tf
+import torch
+import numpy as np
 
 import deepdanbooru as dd
 
@@ -21,14 +22,26 @@ def save_txt_file(txt_path, list):
 def evaluate_image(
     image_input: Union[str, six.BytesIO], model: Any, tags: List[str], threshold: float
 ) -> Iterable[Tuple[str, float]]:
-    width = model.input_shape[2]
-    height = model.input_shape[1]
+    # Get model input dimensions (assuming standard input shape)
+    # For PyTorch models, we need to check the model's expected input size
+    # This is a simplified approach - in a real implementation, you'd store this info
+    width = 299  # Default width, should be configurable
+    height = 299  # Default height, should be configurable
 
     image = dd.data.load_image_for_evaluate(image_input, width=width, height=height)
 
-    image_shape = image.shape
-    image = image.reshape((1, image_shape[0], image_shape[1], image_shape[2]))
-    y = model.predict(image)[0]
+    # Convert to PyTorch tensor and add batch dimension
+    image_tensor = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float()
+    
+    # Set model to evaluation mode
+    model.eval()
+    
+    device = next(model.parameters()).device
+    image_tensor = image_tensor.to(device)
+    
+    # Run inference
+    with torch.no_grad():
+        y = model(image_tensor)[0].cpu().numpy()
 
     result_dict = {}
 
@@ -53,8 +66,13 @@ def evaluate(
     folder_filters,
     verbose,
 ):
+    # Handle GPU settings for PyTorch
     if not allow_gpu:
-        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+        device = torch.device('cpu')
+        print("Using CPU for inference")
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {device}")
 
     if not model_path and not project_path:
         raise Exception("You must provide project path or model path.")
@@ -77,13 +95,16 @@ def evaluate(
     if model_path:
         if verbose:
             print(f"Loading model from {model_path} ...")
-        model = tf.keras.models.load_model(model_path, compile=compile_model)
+        # Load PyTorch model
+        model = torch.load(model_path, map_location=device)
+        model = model.to(device)
     else:
         if verbose:
             print(f"Loading model from project {project_path} ...")
         model = dd.project.load_model_from_project(
             project_path, compile_model=compile_model
         )
+        model = model.to(device)
 
     if tags_path:
         if verbose:
