@@ -20,9 +20,9 @@ install_requires = [
     "six>=1.13.0",
 ]
 
-tensorflow_pkg = [
-    "tensorflow>=2.7.0",
-    "tensorflow-io>=0.22.0",
+pytorch_pkg = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
 ]
 
 setuptools.setup(
@@ -31,7 +31,7 @@ setuptools.setup(
     author="Kichang Kim",
     author_email="admin@kanotype.net",
     description="DeepDanbooru is AI based multi-label girl image classification system, "
-    "implemented by using TensorFlow.",
+    "implemented by using PyTorch.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/KichangKim/DeepDanbooru",
@@ -44,7 +44,7 @@ setuptools.setup(
     python_requires=">=3.6",
     install_requires=install_requires,
     extras_require={
-        "tensorflow": [tensorflow_pkg],
+        "pytorch": [pytorch_pkg],
         "test": ["pytest", "flake8", "mypy"],
     },
     entry_points={
