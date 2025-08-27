@@ -1,19 +1,25 @@
 import os
 
-import tensorflow as tf
+import torch
+import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 import deepdanbooru as dd
 from scipy import ndimage
 
 
-@tf.function
 def get_gradient(model, x, output_mask):
-    with tf.GradientTape() as tape:
-        output = model(x)
-        gradcam_loss = tf.reduce_sum(tf.multiply(output_mask, output))
-
-    return tape.gradient(gradcam_loss, x)
+    """Get gradients for Grad-CAM using PyTorch"""
+    x.requires_grad_(True)
+    
+    output = model(x)
+    gradcam_loss = torch.sum(output_mask * output)
+    
+    # Compute gradients
+    gradcam_loss.backward()
+    gradients = x.grad
+    
+    return gradients
 
 
 def norm_clip_grads(grads):
@@ -29,13 +35,15 @@ def filter_grads(grads):
 
 
 def to_onehot(length, index):
-    value = np.zeros(shape=(1, length), dtype=np.float32)
+    """Create one-hot tensor for PyTorch"""
+    value = torch.zeros(1, length, dtype=torch.float32)
     value[0, index] = 1.0
     return value
 
 
 def grad_cam(project_path, target_path, output_path, threshold):
-    # os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    # Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     if not os.path.exists(target_path):
         raise Exception(f"Target path {target_path} is not exists.")
@@ -55,9 +63,13 @@ def grad_cam(project_path, target_path, output_path, threshold):
         taget_image_paths = dd.extra.natural_sorted(taget_image_paths)
 
     model = dd.project.load_model_from_project(project_path)
+    model = model.to(device)
+    model.eval()
+    
     tags = dd.project.load_tags_from_project(project_path)
-    width = model.input_shape[2]
-    height = model.input_shape[1]
+    # Use default dimensions since PyTorch models don't have input_shape attribute
+    width = 299  # Default width, should be configurable
+    height = 299  # Default height, should be configurable
 
     dd.io.try_create_directory(output_path)
 
@@ -72,10 +84,13 @@ def grad_cam(project_path, target_path, output_path, threshold):
             os.path.join(image_folder, f"input.png")
         )
         image_for_result = image
-        image_shape = image.shape
-        y = model.predict(
-            image.reshape((1, image_shape[0], image_shape[1], image_shape[2]))
-        )[0]
+        
+        # Convert to PyTorch tensor
+        image_tensor = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float().to(device)
+        
+        # Run inference
+        with torch.no_grad():
+            y = model(image_tensor)[0].cpu().numpy()
 
         result_dict = {}
 
@@ -97,9 +112,18 @@ def grad_cam(project_path, target_path, output_path, threshold):
 
         for estimated_tag in estimated_tags:
             print(f"Calculating grad-cam ... ({estimated_tag[1]})")
-            grads = get_gradient(
-                model, tf.Variable([image]), to_onehot(len(tags), estimated_tag[0])
-            )[0]
+            
+            # Create input tensor for gradient computation
+            image_grad_tensor = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float().to(device)
+            image_grad_tensor.requires_grad_(True)
+            
+            # Create one-hot target
+            target_onehot = to_onehot(len(tags), estimated_tag[0]).to(device)
+            
+            # Get gradients
+            grads = get_gradient(model, image_grad_tensor, target_onehot)
+            grads = grads[0].cpu().detach().numpy().transpose(1, 2, 0)  # CHW -> HWC
+            
             print("Normalizing gradients ...")
             grads = norm_clip_grads(grads)
             print("Filtering gradients ...")

@@ -29,12 +29,22 @@ def load_project(project_path):
     tags = dd.data.load_tags_from_project(project_path)
 
     model_type = project_context["model"]
-    model_path = os.path.join(project_path, f"model-{model_type}.keras")
+    model_path = os.path.join(project_path, f"model-{model_type}.pth")
 
     if not os.path.isfile(model_path):
-        model_path = os.path.join(project_path, f"model-{model_type}.h5")
+        # Check for legacy formats
+        legacy_paths = [
+            os.path.join(project_path, f"model-{model_type}.keras"),
+            os.path.join(project_path, f"model-{model_type}.h5")
+        ]
+        for legacy_path in legacy_paths:
+            if os.path.isfile(legacy_path):
+                raise ValueError(f"Found TensorFlow model at {legacy_path}. Please convert to PyTorch format.")
+        
+        raise FileNotFoundError(f"No PyTorch model found at {model_path}")
 
-    model = tf.keras.models.load_model(model_path)
+    # Load model using the same logic as load_model_from_project
+    model = load_model_from_project(project_path)
 
     return project_context, model, tags
 

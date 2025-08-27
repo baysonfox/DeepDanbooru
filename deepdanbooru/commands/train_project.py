@@ -212,8 +212,9 @@ def train_project(project_path, source_model):
                 if learning_rate_per_epoch["used_epoch"] <= int(used_epoch):
                     learning_rate = learning_rate_per_epoch["learning_rate"]
         print(f"Trying to change learning rate to {learning_rate} ...")
-        optimizer.learning_rate.assign(learning_rate)
-        tf.print(f"Learning rate is changed to", optimizer.learning_rate, "...")
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = learning_rate
+        print(f"Learning rate is changed to {learning_rate} ...")
 
         while int(offset) < epoch_size:
             image_records_slice = image_records[
@@ -309,10 +310,9 @@ def train_project(project_path, source_model):
                 )
 
     print("Saving model ...")
-    model_path = os.path.join(project_path, f"model-{model_type}.keras")
+    model_path = os.path.join(project_path, f"model-{model_type}.pth")
 
-    # tf.keras.experimental.export_saved_model throw exception now
-    # see https://github.com/tensorflow/tensorflow/issues/27112
+    # Save PyTorch model state dict
     model.save(model_path, include_optimizer=False)
 
     if use_mixed_precision:

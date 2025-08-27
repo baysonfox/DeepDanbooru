@@ -1,40 +1,67 @@
 from typing import List
-import tensorflow as tf
+import torch
 import deepdanbooru as dd
 
-# optimizations: see in tf.lite.Optimize
-def convert_to_tflite_from_from_saved_model(
+def convert_to_torchscript_from_model(
     project_path: str, model_path: str, save_path: str,
-    optimizations: List[tf.lite.Optimize] = [tf.lite.Optimize.DEFAULT],
+    optimize: bool = True,
     verbose: bool = False
 ):
+    """Convert PyTorch model to TorchScript for deployment"""
     if not model_path and not project_path:
         raise Exception("You must provide project path or model path.")
 
     if not save_path:
-        raise Exception("You must provide a path to save tflite model.")
+        raise Exception("You must provide a path to save TorchScript model.")
 
     if model_path:
         if verbose:
             print(f"Loading model from {model_path} ...")
-        model = tf.keras.models.load_model(model_path)
+        model = torch.load(model_path, map_location='cpu')
     else:
         if verbose:
             print(f"Loading model from project {project_path} ...")
         model = dd.project.load_model_from_project(project_path)
 
-    if verbose:
-        print("Converting ...")
+    model.eval()
 
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    converter.optimizations = optimizations
-    tflite_model = converter.convert()
+    if verbose:
+        print("Converting to TorchScript ...")
+
+    # Create example input for tracing
+    example_input = torch.randn(1, 3, 299, 299)  # Adjust dimensions as needed
+    
+    # Convert to TorchScript using tracing
+    traced_model = torch.jit.trace(model, example_input)
+    
+    if optimize:
+        traced_model = torch.jit.optimize_for_inference(traced_model)
 
     if verbose:
         print("Saving ...")
 
-    with open(save_path, "wb") as f:
-        f.write(tflite_model)
+    traced_model.save(save_path)
 
     if verbose:
-        print(f"Converted model has been saved to {save_path}")
+        print(f"TorchScript model has been saved to {save_path}")
+
+# Keep the old function name for compatibility
+def convert_to_tflite_from_from_saved_model(
+    project_path: str, model_path: str, save_path: str,
+    optimizations: List = None,
+    verbose: bool = False
+):
+    """Legacy function name - now converts to TorchScript instead of TFLite"""
+    print("Warning: TFLite conversion not available. Converting to TorchScript instead.")
+    
+    # Adjust save path extension
+    if save_path.endswith('.tflite'):
+        save_path = save_path.replace('.tflite', '.pt')
+    
+    convert_to_torchscript_from_model(
+        project_path=project_path,
+        model_path=model_path, 
+        save_path=save_path,
+        optimize=True,
+        verbose=verbose
+    )
