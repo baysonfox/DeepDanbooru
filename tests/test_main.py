@@ -34,12 +34,12 @@ def test_package_setup(packages):
     with mock.patch('setuptools.setup'):
         import setup
         setup_pkgs = setup.install_requires
-        tensorflow_pkg = setup.tensorflow_pkg
+        pytorch_pkg = setup.pytorch_pkg
     assert setup_pkgs == list(
-        filter(lambda x: not x.startswith('tensorflow'), packages))
+        filter(lambda x: not x.startswith('torch'), packages))
     assert list(
-        filter(lambda x: x.startswith('tensorflow'), packages)
-    ) == [tensorflow_pkg]
+        filter(lambda x: x.startswith('torch'), packages)
+    ) == pytorch_pkg
 
 
 def test_readme_pkg(packages):
@@ -51,15 +51,15 @@ def test_readme_pkg(packages):
     readme_pkgs = list(map(lambda x: x.split(' ', 1)[1], pkg_text.splitlines()))
 
     assert list(
-        sorted(filter(lambda x: not x.startswith('tensorflow'), readme_pkgs))
+        sorted(filter(lambda x: not x.startswith('torch'), readme_pkgs))
     ) == list(
-        sorted(filter(lambda x: not x.startswith('tensorflow'), packages))
+        sorted(filter(lambda x: not x.startswith('torch'), packages))
     )
 
     assert list(
-        filter(lambda x: x.startswith('tensorflow'), packages)
+        filter(lambda x: x.startswith('torch'), packages)
     ) == list(
-        filter(lambda x: x.startswith('tensorflow'), readme_pkgs)
+        filter(lambda x: x.startswith('torch'), readme_pkgs)
     )
 
 

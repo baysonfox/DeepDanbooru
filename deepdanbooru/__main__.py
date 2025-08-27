@@ -5,7 +5,6 @@ import click
 import warnings
 import os
 import deepdanbooru as dd
-import tensorflow.lite as tflite
 
 __version__ = "1.0.0"
 
@@ -14,7 +13,7 @@ __version__ = "1.0.0"
 @click.group()
 def main():
     """
-    AI based multi-label girl image classification system, implemented by using TensorFlow.
+    AI based multi-label girl image classification system, implemented by using PyTorch.
     """
     pass
 
@@ -214,7 +213,32 @@ def evaluate(
         verbose,
     )
 
-@main.command("conv2tflite", help="Convert saved model into tflite model.")
+@main.command("conv2torchscript", help="Convert saved model into TorchScript model.")
+@click.option(
+    "--project-path",
+    type=click.Path(exists=True, resolve_path=True, file_okay=False, dir_okay=True),
+    help="Project path. If you want to use specific model and tags, use --model-path and --tags-path options.",
+)
+@click.option(
+    "--model-path",
+    type=click.Path(exists=True, resolve_path=True, file_okay=True, dir_okay=False),
+)
+@click.option(
+    "--save-path",
+    type=click.Path(resolve_path=True, file_okay=True, dir_okay=False),
+)
+@click.option("--optimize", default=True, is_flag=True)
+@click.option("--verbose", default=False, is_flag=True)
+def conv2torchscript(project_path, model_path, save_path, optimize, verbose):
+    if verbose:
+        warnings.filterwarnings("always")
+    
+    dd.commands.convert_to_torchscript_from_model(
+        project_path, model_path, save_path, optimize=optimize, verbose=verbose
+    )
+
+# Keep legacy command for compatibility
+@main.command("conv2tflite", help="Convert saved model into TorchScript model (legacy command).")
 @click.option(
     "--project-path",
     type=click.Path(exists=True, resolve_path=True, file_okay=False, dir_okay=True),
@@ -232,15 +256,13 @@ def evaluate(
 @click.option("--optimize-experimental-sparsity", default=False, is_flag=True)
 @click.option("--verbose", default=False, is_flag=True)
 def conv2tflite(project_path, model_path, save_path, optimize_default, optimize_experimental_sparsity, verbose):
+    print("Warning: TFLite conversion has been replaced with TorchScript conversion.")
     if verbose:
         warnings.filterwarnings("always")
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
-    if not optimize_default and not optimize_experimental_sparsity:
-        raise Exception("optimization method must be specified")
-    op = []
-    if optimize_default: op = [tflite.Optimize.DEFAULT]
-    if optimize_experimental_sparsity: op.append(tflite.Optimize.EXPERIMENTAL_SPARSITY)
-    dd.commands.convert_to_tflite_from_from_saved_model(project_path, model_path, save_path, op, verbose=verbose)
+    
+    dd.commands.convert_to_tflite_from_from_saved_model(
+        project_path, model_path, save_path, optimizations=[], verbose=verbose
+    )
 
 
 if __name__ == "__main__":

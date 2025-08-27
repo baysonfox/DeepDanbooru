@@ -1,74 +1,157 @@
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 def conv(
-    x, filters, kernel_size, strides=(1, 1), padding="same", initializer="he_normal"
+    in_channels, out_channels, kernel_size, stride=1, padding="same", initializer="he_normal"
 ):
-    c = tf.keras.layers.Conv2D(
-        filters=filters,
+    """Create a conv2d layer equivalent to TensorFlow version"""
+    if padding == "same":
+        if isinstance(kernel_size, int):
+            padding = kernel_size // 2
+        else:
+            padding = (kernel_size[0] // 2, kernel_size[1] // 2)
+    
+    conv_layer = nn.Conv2d(
+        in_channels=in_channels,
+        out_channels=out_channels,
         kernel_size=kernel_size,
-        strides=strides,
+        stride=stride,
         padding=padding,
-        kernel_initializer=initializer,
-        use_bias=False,
-    )(x)
+        bias=False
+    )
+    
+    # Initialize weights using He normal initialization (equivalent to TF's he_normal)
+    if initializer == "he_normal":
+        nn.init.kaiming_normal_(conv_layer.weight, mode='fan_out', nonlinearity='relu')
+    
+    return conv_layer
 
-    return c
+
+class ConvBN(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=1,
+        padding="same",
+        initializer="he_normal",
+        bn_gamma_initializer="ones",
+    ):
+        super(ConvBN, self).__init__()
+        self.conv = conv(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            initializer=initializer,
+        )
+        self.bn = nn.BatchNorm2d(out_channels)
+        
+        # Initialize BatchNorm gamma (weight) parameter
+        if bn_gamma_initializer == "ones":
+            nn.init.ones_(self.bn.weight)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        return x
 
 
 def conv_bn(
-    x,
-    filters,
+    in_channels,
+    out_channels,
     kernel_size,
-    strides=(1, 1),
+    stride=1,
     padding="same",
     initializer="he_normal",
     bn_gamma_initializer="ones",
 ):
-    c = conv(
-        x,
-        filters=filters,
+    """Factory function for ConvBN layer"""
+    return ConvBN(
+        in_channels=in_channels,
+        out_channels=out_channels,
         kernel_size=kernel_size,
-        strides=strides,
-        padding=padding,
-        initializer=initializer,
-    )
-
-    c_bn = tf.keras.layers.BatchNormalization(gamma_initializer=bn_gamma_initializer)(c)
-
-    return c_bn
-
-
-def conv_bn_relu(
-    x,
-    filters,
-    kernel_size,
-    strides=(1, 1),
-    padding="same",
-    initializer="he_normal",
-    bn_gamma_initializer="ones",
-):
-    c_bn = conv_bn(
-        x,
-        filters=filters,
-        kernel_size=kernel_size,
-        strides=strides,
+        stride=stride,
         padding=padding,
         initializer=initializer,
         bn_gamma_initializer=bn_gamma_initializer,
     )
 
-    return tf.keras.layers.Activation("relu")(c_bn)
+
+class ConvBNReLU(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=1,
+        padding="same",
+        initializer="he_normal",
+        bn_gamma_initializer="ones",
+    ):
+        super(ConvBNReLU, self).__init__()
+        self.conv_bn = ConvBN(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            initializer=initializer,
+            bn_gamma_initializer=bn_gamma_initializer,
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = self.conv_bn(x)
+        x = self.relu(x)
+        return x
 
 
-def conv_gap(x, output_filters, kernel_size=(1, 1)):
-    x = conv(x, filters=output_filters, kernel_size=kernel_size)
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+def conv_bn_relu(
+    in_channels,
+    out_channels,
+    kernel_size,
+    stride=1,
+    padding="same",
+    initializer="he_normal",
+    bn_gamma_initializer="ones",
+):
+    """Factory function for ConvBNReLU layer"""
+    return ConvBNReLU(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        initializer=initializer,
+        bn_gamma_initializer=bn_gamma_initializer,
+    )
 
-    return x
+
+class ConvGAP(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=1):
+        super(ConvGAP, self).__init__()
+        self.conv = conv(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size)
+        self.gap = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.gap(x)
+        x = x.flatten(1)  # Flatten spatial dimensions
+        return x
+
+
+def conv_gap(in_channels, out_channels, kernel_size=1):
+    """Factory function for ConvGAP layer"""
+    return ConvGAP(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size)
 
 
 def repeat_blocks(x, block_delegate, count, **kwargs):
+    """Apply a block function multiple times"""
     assert count >= 0
 
     for _ in range(count):
@@ -76,19 +159,31 @@ def repeat_blocks(x, block_delegate, count, **kwargs):
     return x
 
 
-def squeeze_excitation(x, reduction=16):
+class SqueezeExcitation(nn.Module):
     """
     Squeeze-Excitation layer from https://arxiv.org/abs/1709.01507
     """
-    output_filters = x.shape[-1]
+    def __init__(self, channels, reduction=16):
+        super(SqueezeExcitation, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Linear(channels, channels // reduction)
+        self.fc2 = nn.Linear(channels // reduction, channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.sigmoid = nn.Sigmoid()
 
-    assert output_filters // reduction > 0
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        # Squeeze
+        s = self.avg_pool(x).view(b, c)
+        # Excitation
+        s = self.fc1(s)
+        s = self.relu(s)
+        s = self.fc2(s)
+        s = self.sigmoid(s).view(b, c, 1, 1)
+        # Scale
+        return x * s.expand_as(x)
 
-    s = x
 
-    s = tf.keras.layers.GlobalAveragePooling2D()(s)
-    s = tf.keras.layers.Dense(output_filters // reduction, activation="relu")(s)
-    s = tf.keras.layers.Dense(output_filters, activation="sigmoid")(s)
-    x = tf.keras.layers.Multiply()([x, s])
-
-    return x
+def squeeze_excitation(channels, reduction=16):
+    """Factory function for SqueezeExcitation layer"""
+    return SqueezeExcitation(channels=channels, reduction=reduction)
