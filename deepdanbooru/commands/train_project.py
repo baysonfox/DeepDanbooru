@@ -4,24 +4,30 @@ from sqlite3.dbapi2 import NotSupportedError
 import time
 import datetime
 
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.amp import autocast, GradScaler
 
 import deepdanbooru as dd
 
 
-def export_model_as_float32(temporary_model, checkpoint_path, export_path):
+def export_model_as_float32(model, checkpoint_path, export_path):
     """
-    Hotfix for exporting mixed precision model as float32.
+    Export PyTorch model as float32.
     """
-    checkpoint = tf.train.Checkpoint(model=temporary_model)
-
-    manager = tf.train.CheckpointManager(
-        checkpoint=checkpoint, directory=checkpoint_path, max_to_keep=3
-    )
-
-    checkpoint.restore(manager.latest_checkpoint).expect_partial()
-
-    temporary_model.save(export_path, include_optimizer=False)
+    # Load the latest checkpoint
+    checkpoint_files = [f for f in os.listdir(checkpoint_path) if f.endswith('.pth')]
+    if checkpoint_files:
+        latest_checkpoint = max(checkpoint_files, key=lambda x: os.path.getctime(os.path.join(checkpoint_path, x)))
+        checkpoint_state = torch.load(os.path.join(checkpoint_path, latest_checkpoint), map_location='cpu')
+        model.load_state_dict(checkpoint_state['model'])
+    
+    # Ensure model is in float32
+    model = model.float()
+    
+    # Save the model
+    torch.save(model.state_dict(), export_path)
 
 
 def train_project(project_path, source_model):
@@ -66,29 +72,19 @@ def train_project(project_path, source_model):
     )
     checkpoint_path = os.path.join(project_path, "checkpoints")
 
-    # disable PNG warning
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-    # tf.logging.set_verbosity(tf.logging.ERROR)
+    # Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-    # tf.keras.backend.set_epsilon(1e-6)
-    # tf.keras.mixed_precision.experimental.set_policy('infer_float32_vars')
-    # tf.config.gpu.set_per_process_memory_growth(True)
-
+    # Create model first to pass parameters to optimizer
     if optimizer_type == "adam":
-        optimizer = tf.optimizers.Adam(learning_rate)
-        print("Using Adam optimizer ... ")
+        optimizer_type_store = "adam"
     elif optimizer_type == "sgd":
-        optimizer = tf.optimizers.SGD(learning_rate, momentum=0.9, nesterov=True)
-        print("Using SGD optimizer ... ")
+        optimizer_type_store = "sgd"
     elif optimizer_type == "rmsprop":
-        optimizer = tf.optimizers.RMSprop(learning_rate)
-        print("Using RMSprop optimizer ... ")
+        optimizer_type_store = "rmsprop"
     else:
         raise Exception(f"Not supported optimizer : {optimizer_type}")
-
-    if use_mixed_precision:
-        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
-        print("Optimizer is changed to LossScaleOptimizer.")
 
     if model_type == "resnet_152":
         model_delegate = dd.model.resnet.create_resnet_152
@@ -102,84 +98,95 @@ def train_project(project_path, source_model):
         model_delegate = dd.model.resnet.create_resnet_custom_v4
     else:
         raise Exception(f"Not supported model : {model_type}")
+    
+    # Create model
+    model = model_delegate((height, width, 3), output_dim)
+    model = model.to(device)
+    
+    # Create optimizer
+    if optimizer_type_store == "adam":
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        print("Using Adam optimizer ... ")
+    elif optimizer_type_store == "sgd":
+        optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, nesterov=True)
+        print("Using SGD optimizer ... ")
+    elif optimizer_type_store == "rmsprop":
+        optimizer = optim.RMSprop(model.parameters(), lr=learning_rate)
+        print("Using RMSprop optimizer ... ")
+
+    # Setup mixed precision if requested
+    scaler = None
+    if use_mixed_precision:
+        scaler = GradScaler()
+        print("Mixed precision training enabled.")
 
     print("Loading tags ... ")
     tags = dd.project.load_tags_from_project(project_path)
     output_dim = len(tags)
 
     print(f"Creating model ({model_type}) ... ")
-    # tf.keras.backend.set_learning_phase(1)
 
     if source_model:
-        model = tf.keras.models.load_model(source_model)
-        print(
-            f"Model : {model.input_shape} -> {model.output_shape} (loaded from {source_model})"
-        )
+        # Load existing PyTorch model
+        model = torch.load(source_model, map_location=device)
+        print(f"Model loaded from {source_model}")
+        model = model.to(device)
     else:
-        if use_mixed_precision:
-            policy = tf.keras.mixed_precision.Policy("mixed_float16")
-            tf.keras.mixed_precision.set_global_policy(policy)
+        # Create new model  
+        model = model_delegate((height, width, 3), output_dim)
+        model = model.to(device)
+        
+        # Create optimizer after model is created
+        if optimizer_type_store == "adam":
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        elif optimizer_type_store == "sgd":
+            optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, nesterov=True)
+        elif optimizer_type_store == "rmsprop":
+            optimizer = optim.RMSprop(model.parameters(), lr=learning_rate)
 
-        inputs = tf.keras.Input(shape=(height, width, 3), dtype=tf.float32)  # HWC
-        ouputs = model_delegate(inputs, output_dim)
-        model = tf.keras.Model(inputs=inputs, outputs=ouputs, name=model_type)
+    print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
 
-        if use_mixed_precision:
-            policy = tf.keras.mixed_precision.Policy("float32")
-            tf.keras.mixed_precision.set_global_policy(policy)
-
-            inputs_float32 = tf.keras.Input(
-                shape=(height, width, 3), dtype=tf.float32
-            )  # HWC
-            ouputs_float32 = model_delegate(inputs_float32, output_dim)
-            model_float32 = tf.keras.Model(
-                inputs=inputs_float32, outputs=ouputs_float32, name=model_type
-            )
-
-            print("float32 model is created.")
-
-        print(f"Model : {model.input_shape} -> {model.output_shape}")
-
+    # Setup loss function
     if loss_type == "binary_crossentropy":
-        loss = loss = tf.keras.losses.BinaryCrossentropy()
+        loss_fn = dd.model.losses.binary_crossentropy()
     elif loss_type == "focal_loss":
-        loss = dd.model.losses.focal_loss()
+        loss_fn = dd.model.losses.focal_loss()
     else:
         raise NotSupportedError(f"Loss type '{loss_type}' is not supported.")
     print(f"Using loss : {loss_type}")
 
-    model.compile(
-        optimizer=optimizer,
-        loss=loss,
-        metrics=[tf.keras.metrics.Precision(), tf.keras.metrics.Recall()],
-    )
-
     print(f"Loading database ... ")
     image_records = dd.data.load_image_records(database_path, minimum_tag_count)
 
-    # Checkpoint variables
-    used_epoch = tf.Variable(0, dtype=tf.int64)
-    used_minibatch = tf.Variable(0, dtype=tf.int64)
-    used_sample = tf.Variable(0, dtype=tf.int64)
-    offset = tf.Variable(0, dtype=tf.int64)
-    random_seed = tf.Variable(0, dtype=tf.int64)
-
-    checkpoint = tf.train.Checkpoint(
-        optimizer=optimizer,
-        model=model,
-        used_epoch=used_epoch,
-        used_minibatch=used_minibatch,
-        used_sample=used_sample,
-        offset=offset,
-        random_seed=random_seed,
-    )
-
-    manager = tf.train.CheckpointManager(
-        checkpoint=checkpoint, directory=checkpoint_path, max_to_keep=3
-    )
-
-    if manager.latest_checkpoint:
+    # Checkpoint variables (PyTorch style)
+    checkpoint_vars = {
+        'used_epoch': 0,
+        'used_minibatch': 0, 
+        'used_sample': 0,
+        'offset': 0,
+        'random_seed': 0
+    }
+    
+    # Create checkpoint directory
+    os.makedirs(checkpoint_path, exist_ok=True)
+    
+    # Try to load latest checkpoint
+    checkpoint_files = [f for f in os.listdir(checkpoint_path) if f.endswith('.pth')]
+    if checkpoint_files:
+        latest_checkpoint = max(checkpoint_files, key=lambda x: os.path.getctime(os.path.join(checkpoint_path, x)))
+        checkpoint_path_full = os.path.join(checkpoint_path, latest_checkpoint)
         print(f"Checkpoint exists. Continuing training ... ({datetime.datetime.now()})")
+        
+        checkpoint_state = torch.load(checkpoint_path_full, map_location=device)
+        model.load_state_dict(checkpoint_state['model'])
+        optimizer.load_state_dict(checkpoint_state['optimizer'])
+        checkpoint_vars.update(checkpoint_state['vars'])
+        if scaler and 'scaler' in checkpoint_state:
+            scaler.load_state_dict(checkpoint_state['scaler'])
+            
+        print(f"used_epoch={checkpoint_vars['used_epoch']}, used_minibatch={checkpoint_vars['used_minibatch']}, used_sample={checkpoint_vars['used_sample']}, offset={checkpoint_vars['offset']}, random_seed={checkpoint_vars['random_seed']}")
+    else:
+        print(f"No checkpoint. Starting new training ... ({datetime.datetime.now()})")
         checkpoint.restore(manager.latest_checkpoint)
         print(
             f"used_epoch={int(used_epoch)}, used_minibatch={int(used_minibatch)}, used_sample={int(used_sample)}, offset={int(offset)}, random_seed={int(random_seed)}"
